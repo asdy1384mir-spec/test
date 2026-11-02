@@ -1,0 +1,652 @@
+
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Alien Arena</title>
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+
+<style>
+*{box-sizing:border-box;user-select:none;-webkit-user-select:none}
+body{margin:0;background:#050816;color:white;font-family:Arial;overflow:hidden;touch-action:none}
+
+header{
+ height:48px;display:flex;justify-content:space-around;
+ align-items:center;color:#37e7ff;background:#0b1430;
+ font-weight:bold;font-size:12px;gap:5px;padding:0 5px
+}
+
+#playerCount{
+ color:#baff39;
+ border:1px solid #baff39;
+ border-radius:7px;
+ padding:5px 8px;
+ white-space:nowrap
+}
+
+#roomBadge{
+ color:#37e7ff;
+ border:1px solid #37e7ff;
+ border-radius:7px;
+ padding:5px 8px;
+ white-space:nowrap;
+ display:none
+}
+
+#menu{
+ position:absolute;inset:48px 0 0;background:#080d20;z-index:5;
+ display:flex;align-items:center;justify-content:center;
+ text-align:center;overflow-y:auto
+}
+
+.panel{
+ width:min(90%,400px);padding:18px;background:#111d3b;
+ border:2px solid #37e7ff;border-radius:15px
+}
+
+input,button{
+ padding:12px;border-radius:8px;border:1px solid #37e7ff;
+ background:#09152c;color:white;font-size:15px;margin:5px
+}
+
+button{background:#123b59;color:#37e7ff;font-weight:bold}
+
+#gameArea{
+ width:100vw;height:calc(100dvh - 48px);
+ display:flex;align-items:center;justify-content:center;overflow:hidden
+}
+
+canvas{
+ display:block;
+ width:min(100vw,calc((100dvh - 48px)*1.6667));
+ height:auto;max-height:calc(100dvh - 48px);
+ aspect-ratio:5/3;border:2px solid #37e7ff;
+ image-rendering:pixelated
+}
+
+#controls{position:fixed;inset:48px 0 0;pointer-events:none;display:none}
+
+#joy{
+ position:absolute;left:12px;bottom:15px;width:110px;height:110px;
+ border:3px solid #37e7ff;background:#17345acc;border-radius:50%;
+ pointer-events:auto;touch-action:none
+}
+
+#stick{
+ position:absolute;left:25px;top:25px;width:55px;height:55px;
+ border-radius:50%;background:#37e7ff;border:3px solid white
+}
+
+.action{
+ position:absolute;right:15px;width:65px;height:65px;
+ border-radius:50%;display:grid;place-items:center;font-weight:bold;
+ font-size:12px;border:3px solid white;
+ pointer-events:auto;touch-action:none
+}
+
+#jump{bottom:100px;background:#8055ff}
+#shoot{bottom:18px;right:95px;background:#ff386e}
+
+#status{font-size:13px;color:#baff39;min-height:20px}
+#invite{font-size:12px;overflow-wrap:anywhere;color:#baff39}
+#rotate{display:none!important}
+
+@media(orientation:portrait){
+ canvas{
+  width:100vw;height:auto;
+  max-height:calc(100dvh - 48px)
+ }
+}
+</style>
+</head>
+
+<body>
+
+<header>
+ <span>ALIEN ARENA</span>
+ <span id="stats">NOT CONNECTED</span>
+ <span id="playerCount">PLAYERS 0/4</span>
+ <span id="roomBadge">ROOM CODE: <b id="roomCodeLabel">------</b></span>
+</header>
+
+<div id="menu">
+ <div class="panel">
+  <h1 style="color:#37e7ff">OSHELAL ARENA</h1>
+  <p>FOUR PLAYER BATTLE</p>
+  <button id="create">CREATE ROOM</button>
+  <hr>
+  <input id="code" placeholder="ROOM CODE" maxlength="6">
+  <button id="join">JOIN ROOM</button>
+  <p id="status">Create a room or enter a room code.</p>
+  <p id="invite"></p>
+  <button id="share" style="display:none">SHARE INVITE LINK</button>
+ </div>
+</div>
+
+<div id="gameArea">
+ <canvas id="game" width="1000" height="600"></canvas>
+</div>
+
+<div id="controls">
+ <div id="joy"><div id="stick"></div></div>
+ <div id="jump" class="action">JUMP</div>
+ <div id="shoot" class="action">FIRE</div>
+</div>
+
+<script>
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+const statusEl=document.getElementById("status");
+const stats=document.getElementById("stats");
+const playerCount=document.getElementById("playerCount");
+const controls=document.getElementById("controls");
+
+const W=1000,GROUND=520;
+const colors=["#37e7ff","#ff4d79","#baff39","#b58aff"];
+
+let peer=null;
+let host=false;
+let myId=null;
+let roomId=null;
+let connections=[];
+let players={};
+let bullets=[];
+let input={left:false,right:false,jump:false,shoot:false};
+let frame=0;
+let gameStarted=false;
+
+const stars=Array.from({length:90},()=>({
+ x:Math.random()*W,y:Math.random()*450,
+ size:Math.random()*2+1
+}));
+
+function say(s){statusEl.textContent=s}
+
+/* شمارنده بازیکنان */
+function updatePlayerCount(){
+ const count=Math.min(4,Object.keys(players).length);
+ playerCount.textContent="PLAYERS "+count+"/4";
+}
+
+function createPlayer(id,slot){
+ return {
+  id,name:"PLAYER "+(slot+1),slot,
+  color:colors[slot],
+  x:100+slot*230,y:GROUND-60,
+  vx:0,vy:0,hp:100,kills:0,deaths:0,
+  facing:1,onGround:true,
+  invincible:90,cooldown:0,shootTime:0,
+  jumpLock:false,
+  input:{left:false,right:false,jump:false,shoot:false}
+ };
+}
+
+function roomCode(){
+ return Math.random().toString(36).substring(2,8).toUpperCase();
+}
+
+function showGame(){
+ document.getElementById("menu").style.display="none";
+ controls.style.display="block";
+ gameStarted=true;
+}
+
+function createRoom(){
+ if(peer)return;
+
+ const code=roomCode();
+ roomId="alienarena-"+code.toLowerCase();
+ host=true;
+ say("Creating room...");
+
+ peer=new Peer(roomId);
+
+ peer.on("open",id=>{
+  myId=id;
+  players[id]=createPlayer(id,0);
+
+  document.getElementById("code").value=code;
+  document.getElementById("roomCodeLabel").textContent=code;
+  document.getElementById("roomBadge").style.display="inline-block";
+
+  document.getElementById("invite").textContent=
+   location.href.split("?")[0]+"?room="+code;
+
+  document.getElementById("share").style.display="inline-block";
+
+  updatePlayerCount();
+  say("ROOM CREATED! SHARE THE CODE: "+code);
+  showGame();
+ });
+
+ peer.on("connection",conn=>{
+  const used=Object.values(players).map(p=>p.slot);
+
+  if(used.length>=4){
+   conn.on("open",()=>{
+    conn.send({type:"full"});
+    conn.close();
+   });
+   return;
+  }
+
+  let slot=0;
+  while(used.includes(slot))slot++;
+
+  const player=createPlayer(conn.peer,slot);
+  players[conn.peer]=player;
+  updatePlayerCount();
+
+  conn.on("open",()=>{
+   connections.push(conn);
+   conn.send({type:"welcome",id:conn.peer});
+  });
+
+  conn.on("data",data=>{
+   if(data.type==="input"&&players[conn.peer]){
+    players[conn.peer].input=data.input;
+   }
+  });
+
+  conn.on("close",()=>{
+   delete players[conn.peer];
+   connections=connections.filter(c=>c!==conn);
+   updatePlayerCount();
+  });
+
+  conn.on("error",()=>{
+   delete players[conn.peer];
+   connections=connections.filter(c=>c!==conn);
+   updatePlayerCount();
+  });
+ });
+
+ peer.on("error",e=>{
+  say("Connection error: "+e.type);
+ });
+}
+
+function joinRoom(){
+ if(peer)return;
+
+ let code=document.getElementById("code").value.trim().toLowerCase();
+
+ if(!/^[a-z0-9]{6}$/.test(code)){
+  say("Enter a valid 6-character room code.");
+  return;
+ }
+
+ roomId="alienarena-"+code;
+ host=false;
+ say("Connecting to room...");
+
+ peer=new Peer();
+
+ peer.on("open",()=>{
+  const conn=peer.connect(roomId,{reliable:true});
+
+  conn.on("open",()=>{
+   connections=[conn];
+   say("Connected! Waiting for game state...");
+  });
+
+  conn.on("data",data=>{
+   if(data.type==="full"){
+    say("ROOM IS FULL");
+    conn.close();
+    return;
+   }
+
+   if(data.type==="welcome"){
+    myId=data.id;
+    showGame();
+    say("You joined the arena!");
+   }
+
+   if(data.type==="state"){
+    players={};
+    data.players.forEach(p=>players[p.id]=p);
+    bullets=data.bullets;
+    updatePlayerCount();
+   }
+  });
+
+  conn.on("close",()=>{
+   say("Host disconnected.");
+   gameStarted=false;
+   controls.style.display="none";
+   document.getElementById("menu").style.display="flex";
+   playerCount.textContent="PLAYERS 0/4";
+  });
+
+  conn.on("error",()=>{
+   say("Connection lost.");
+  });
+ });
+
+ peer.on("error",e=>{
+  say("Could not connect: "+e.type);
+ });
+}
+
+document.getElementById("create").onclick=createRoom;
+document.getElementById("join").onclick=joinRoom;
+
+document.getElementById("share").onclick=async()=>{
+ const url=document.getElementById("invite").textContent;
+ try{
+  if(navigator.share)await navigator.share({title:"Alien Arena",url});
+  else await navigator.clipboard.writeText(url);
+ }catch(e){}
+};
+
+const urlRoom=new URLSearchParams(location.search).get("room");
+if(urlRoom)document.getElementById("code").value=urlRoom;
+
+function respawn(p){
+ p.x=80+Math.random()*800;
+ p.y=GROUND-60;
+ p.vx=0;p.vy=0;p.hp=100;
+ p.invincible=100;
+ p.onGround=true;
+}
+
+function updatePlayer(p){
+ const i=p.input;
+ const speed=4.5;
+
+ if(i.left){p.vx=-speed;p.facing=-1}
+ else if(i.right){p.vx=speed;p.facing=1}
+ else p.vx*=.75;
+
+ if(i.jump&&p.onGround&&!p.jumpLock){
+  p.vy=-12;p.onGround=false;p.jumpLock=true;
+ }
+ if(!i.jump)p.jumpLock=false;
+
+ p.vy+=.65;
+ p.x+=p.vx;
+ p.y+=p.vy;
+
+ p.x=Math.max(20,Math.min(W-75,p.x));
+
+ if(p.y>=GROUND-60){
+  p.y=GROUND-60;p.vy=0;p.onGround=true;
+ }
+
+ if(p.invincible>0)p.invincible--;
+ if(p.cooldown>0)p.cooldown--;
+ if(p.shootTime>0)p.shootTime--;
+
+ if(i.shoot&&p.cooldown<=0){
+  p.cooldown=15;
+  p.shootTime=7;
+  bullets.push({
+   owner:p.id,
+   x:p.x+(p.facing===1?55:0),
+   y:p.y+29,
+   vx:p.facing*13,
+   life:85,color:p.color
+  });
+ }
+}
+
+function updateBullets(){
+ for(let i=bullets.length-1;i>=0;i--){
+  const b=bullets[i];
+  b.x+=b.vx;b.life--;
+  let remove=b.life<=0||b.x<0||b.x>W;
+
+  if(!remove){
+   for(const p of Object.values(players)){
+    if(p.id===b.owner||p.invincible>0)continue;
+
+    if(b.x>p.x&&b.x<p.x+55&&b.y>p.y&&b.y<p.y+60){
+     p.hp-=35;
+     remove=true;
+
+     if(p.hp<=0){
+      if(players[b.owner])players[b.owner].kills++;
+      p.deaths++;
+      respawn(p);
+     }
+     break;
+    }
+   }
+  }
+  if(remove)bullets.splice(i,1);
+ }
+}
+
+/* شبیه‌سازی و ارسال وضعیت توسط هاست */
+setInterval(()=>{
+ if(!host||!gameStarted)return;
+
+ if(players[myId])players[myId].input={...input};
+
+ Object.values(players).forEach(updatePlayer);
+ updateBullets();
+
+ const state={
+  players:Object.values(players).map(p=>({
+   ...p,input:undefined
+  })),
+  bullets
+ };
+
+ connections.forEach(c=>{
+  if(c.open){
+   try{c.send({type:"state",...state})}
+   catch(e){}
+  }
+ });
+
+ updatePlayerCount();
+},1000/30);
+
+/* ارسال ورودی بازیکنان مهمان */
+setInterval(()=>{
+ if(!host&&myId&&connections[0]?.open){
+  connections[0].send({type:"input",input});
+ }
+},40);
+
+// کنترل دسته مجازی
+const joy=document.getElementById("joy");
+const stick=document.getElementById("stick");
+let pointer=null;
+
+function moveJoy(e){
+ const r=joy.getBoundingClientRect();
+ let dx=e.clientX-(r.left+r.width/2);
+ let dy=e.clientY-(r.top+r.height/2);
+ const len=Math.hypot(dx,dy),max=25;
+
+ if(len>max){dx=dx/len*max;dy=dy/len*max}
+
+ stick.style.left=(25+dx)+"px";
+ stick.style.top=(25+dy)+"px";
+ input.left=dx < -12;
+ input.right=dx > 12;
+}
+
+function resetJoy(){
+ pointer=null;
+ stick.style.left="25px";
+ stick.style.top="25px";
+ input.left=false;input.right=false;
+}
+
+joy.addEventListener("pointerdown",e=>{
+ e.preventDefault();
+ pointer=e.pointerId;
+ joy.setPointerCapture(pointer);
+ moveJoy(e);
+});
+
+joy.addEventListener("pointermove",e=>{
+ if(e.pointerId===pointer)moveJoy(e);
+});
+
+joy.addEventListener("pointerup",resetJoy);
+joy.addEventListener("pointercancel",resetJoy);
+
+function hold(id,key){
+ const el=document.getElementById(id);
+ el.addEventListener("pointerdown",e=>{
+  e.preventDefault();
+  el.setPointerCapture(e.pointerId);
+  input[key]=true;
+ });
+ const release=()=>input[key]=false;
+ el.addEventListener("pointerup",release);
+ el.addEventListener("pointercancel",release);
+}
+
+hold("jump","jump");
+hold("shoot","shoot");
+
+window.addEventListener("keydown",e=>{
+ const k=e.key.toLowerCase();
+ if(k==="a"||k==="arrowleft")input.left=true;
+ if(k==="d"||k==="arrowright")input.right=true;
+ if(k==="w"||k==="arrowup")input.jump=true;
+ if(e.code==="Space")input.shoot=true;
+});
+
+window.addEventListener("keyup",e=>{
+ const k=e.key.toLowerCase();
+ if(k==="a"||k==="arrowleft")input.left=false;
+ if(k==="d"||k==="arrowright")input.right=false;
+ if(k==="w"||k==="arrowup")input.jump=false;
+ if(e.code==="Space")input.shoot=false;
+});
+
+function rect(x,y,w,h,c){
+ ctx.fillStyle=c;ctx.fillRect(x,y,w,h);
+}
+
+function glow(c,n){
+ ctx.shadowColor=c;ctx.shadowBlur=n;
+}
+
+function noGlow(){ctx.shadowBlur=0}
+
+function drawBackground(){
+ const g=ctx.createLinearGradient(0,0,0,600);
+ g.addColorStop(0,"#080d29");
+ g.addColorStop(1,"#171333");
+ ctx.fillStyle=g;ctx.fillRect(0,0,1000,600);
+
+ stars.forEach(s=>{
+  s.x-=.3;if(s.x<0)s.x=1000;
+  rect(s.x,s.y,s.size,s.size,"#c7eaff");
+ });
+
+ ctx.fillStyle="#38276d";
+ ctx.beginPath();ctx.arc(790,145,60,0,Math.PI*2);ctx.fill();
+
+ ctx.fillStyle="#101b3b";
+ ctx.beginPath();
+ ctx.moveTo(0,450);ctx.lineTo(150,330);
+ ctx.lineTo(290,450);ctx.lineTo(450,350);
+ ctx.lineTo(610,450);ctx.lineTo(800,320);
+ ctx.lineTo(1000,450);ctx.lineTo(1000,600);
+ ctx.lineTo(0,600);ctx.fill();
+
+ rect(0,520,1000,80,"#18213b");
+ glow("#37e7ff",12);rect(0,520,1000,4,"#37e7ff");noGlow();
+}
+
+function drawPlayer(p){
+ const x=p.x,y=p.y;
+ const moving=Math.abs(p.vx)>.5;
+ const t=frame*.18;
+ const leg=p.onGround&&moving?Math.sin(t)*6:0;
+
+ ctx.save();
+ if(p.invincible>0&&Math.floor(frame/5)%2===0)ctx.globalAlpha=.4;
+
+ if(p.id===myId){
+  glow(p.color,14);
+  ctx.strokeStyle=p.color;ctx.lineWidth=2;
+  ctx.beginPath();ctx.ellipse(x+27,y+29,36,42,0,0,Math.PI*2);ctx.stroke();
+  noGlow();
+ }
+
+ rect(x+9,y+42+leg,13,18,"#273b64");
+ rect(x+31,y+42-leg,13,18,"#273b64");
+ rect(x+7,y+57+leg,17,5,p.color);
+ rect(x+29,y+57-leg,17,5,p.color);
+
+ glow(p.color,10);
+ rect(x+6,y+18,43,30,"#263d65");
+ rect(x+12,y+23,31,20,p.color);
+ noGlow();
+
+ rect(x-2,y+23,10,25,"#586486");
+ rect(x+10,y,34,25,"#b6c8db");
+ rect(x+14,y+5,27,15,"#263b5c");
+
+ glow("#37e7ff",12);
+ rect(x+17,y+8,22,6,"#37e7ff");
+ noGlow();
+
+ const gx=p.facing===1?x+39:x-15;
+ rect(gx,y+27,26,9,"#9baebe");
+ rect(gx,y+29,26,4,p.color);
+
+ if(p.shootTime>0){
+  glow("#fff1a0",18);
+  rect(p.facing===1?x+65:x-16,y+28,10,7,"#fff1a0");
+  noGlow();
+ }
+
+ ctx.restore();
+
+ rect(x,y-13,55,5,"#333");
+ rect(x,y-13,55*p.hp/100,5,"#37ff91");
+
+ ctx.fillStyle="white";
+ ctx.font="12px Arial";
+ ctx.textAlign="center";
+ ctx.fillText(p.name,x+27,y-20);
+}
+
+function draw(){
+ frame++;
+ drawBackground();
+
+ const sorted=Object.values(players).sort((a,b)=>b.kills-a.kills);
+ ctx.font="bold 15px Arial";
+ ctx.textAlign="left";
+ ctx.fillStyle="white";
+ ctx.fillText("LEADERBOARD",18,25);
+
+ sorted.forEach((p,i)=>{
+  ctx.fillStyle=p.color;
+  ctx.fillText((i+1)+". "+p.name+" K:"+p.kills,18,48+i*21);
+ });
+
+ Object.values(players).forEach(drawPlayer);
+
+ bullets.forEach(b=>{
+  glow(b.color,12);
+  rect(b.x,b.y-3,20,6,b.color);
+  noGlow();
+ });
+
+ if(gameStarted&&myId){
+  const me=players[myId];
+  if(me)stats.textContent="HP "+me.hp+" | KILLS "+me.kills;
+ }
+
+ updatePlayerCount();
+ requestAnimationFrame(draw);
+}
+
+draw();
+</script>
+</body>
+</html>
